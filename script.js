@@ -38,6 +38,100 @@ function loadImage(url) {
   });
 }
 
+// Function to extract images and overlay specs from token data
+function extractImages(tokenData) {
+  const images = [];
+
+  // Extract self image and overlay specs
+  if (tokenData.customizing && tokenData.customizing.self) {
+    const self = tokenData.customizing.self;
+    images.push({
+      url: self.url,
+      overlaySpecs: self.image_overlay_specs || {},
+      layer: self.image_overlay_specs && self.image_overlay_specs.layer || 0,
+      orderInLayer: self.image_overlay_specs && self.image_overlay_specs.order_in_layer || 0,
+    });
+  } else if (tokenData.image) {
+    // Fallback to tokenData.image if customizing.self is not present
+    images.push({
+      url: tokenData.image,
+      overlaySpecs: {},
+      layer: 0,
+      orderInLayer: 0,
+    });
+  }
+
+  // Process children tokens
+  if (Array.isArray(tokenData.children)) {
+    tokenData.children.forEach((child) => {
+      images.push(...extractImages(child));
+    });
+  }
+
+  return images;
+}
+
+// Function to draw an image with overlay specs
+function drawImageWithOverlay(ctx, image, overlaySpecs) {
+  ctx.save();
+
+  // Set global alpha (opacity)
+  if (overlaySpecs.opacity !== undefined) {
+    ctx.globalAlpha = overlaySpecs.opacity;
+  }
+
+  // Calculate position
+  let x = 0;
+  let y = 0;
+
+  // Apply parent_anchor_point
+  if (overlaySpecs.parent_anchor_point) {
+    x += overlaySpecs.parent_anchor_point.x || 0;
+    y += overlaySpecs.parent_anchor_point.y || 0;
+  }
+
+  // Apply offset
+  if (overlaySpecs.offset) {
+    x += overlaySpecs.offset.x || 0;
+    y += overlaySpecs.offset.y || 0;
+  }
+
+  // Apply anchor_point (we need to adjust for the anchor point)
+  const anchorX = overlaySpecs.anchor_point ? overlaySpecs.anchor_point.x || 0 : 0;
+  const anchorY = overlaySpecs.anchor_point ? overlaySpecs.anchor_point.y || 0 : 0;
+
+  // Translate to the position where we want to draw
+  ctx.translate(x, y);
+
+  // Apply rotation
+  if (overlaySpecs.rotation) {
+    ctx.rotate((overlaySpecs.rotation * Math.PI) / 180); // Convert degrees to radians
+  }
+
+  // Apply scaling
+  if (overlaySpecs.scale) {
+    let scaleX = 1;
+    let scaleY = 1;
+    const unit = overlaySpecs.scale.unit || '%';
+    if (unit === '%') {
+      scaleX = (overlaySpecs.scale.x !== undefined ? overlaySpecs.scale.x : 100) / 100;
+      scaleY = (overlaySpecs.scale.y !== undefined ? overlaySpecs.scale.y : 100) / 100;
+    } else if (unit === 'px') {
+      scaleX = (overlaySpecs.scale.x !== undefined ? overlaySpecs.scale.x : image.width) / image.width;
+      scaleY = (overlaySpecs.scale.y !== undefined ? overlaySpecs.scale.y : image.height) / image.height;
+    }
+    ctx.scale(scaleX, scaleY);
+  }
+
+  // Translate to adjust for anchor point
+  ctx.translate(-anchorX, -anchorY);
+
+  // Draw the image
+  ctx.drawImage(image, 0, 0);
+
+  ctx.restore();
+}
+
 // Main function to compose images
 async function composeImages() {
   const params = getQueryParams();
@@ -52,28 +146,32 @@ async function composeImages() {
     // Fetch token data
     const tokenData = await fetchTokenData(collectionId, tokenId);
 
-    // Extract image URLs
-    const imageUrls = [tokenData.image];
-
-    // If there are children, include their images
-    if (Array.isArray(tokenData.children)) {
-      tokenData.children.forEach((child) => {
-        if (child.image) {
-          imageUrls.push(child.image);
-        }
-      });
-    }
+    // Extract images and overlay specs
+    const imagesData = extractImages(tokenData);
 
     // Load all images
-    const images = await Promise.all(imageUrls.map((url) => loadImage(url)));
+    const images = await Promise.all(imagesData.map((imgData) =>
+      loadImage(imgData.url).then((img) => {
+        img.imgData = imgData; // Attach imgData to the image object
+        return img;
+      })
+    ));
+
+    // Sort images by layer and order_in_layer
+    images.sort((a, b) => {
+      const layerDiff = (a.imgData.layer || 0) - (b.imgData.layer || 0);
+      if (layerDiff !== 0) return layerDiff;
+      return (a.imgData.orderInLayer || 0) - (b.imgData.orderInLayer || 0);
+    });
 
     // Create canvas context
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
 
     // Determine canvas size based on the first image
-    const canvasWidth = images[0].width;
-    const canvasHeight = images[0].height;
+    const baseImage = images[0];
+    const canvasWidth = baseImage.width;
+    const canvasHeight = baseImage.height;
     canvas.width = canvasWidth;
     canvas.height = canvasHeight;
 
@@ -84,13 +182,14 @@ async function composeImages() {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-    // Draw images in order
+    // Draw images in sorted order
     images.forEach((image) => {
-      ctx.drawImage(image, 0, 0);
+      drawImageWithOverlay(ctx, image, image.imgData.overlaySpecs);
     });
 
     // Provide a way to download the composed image
     createDownloadLink(canvas);
+
   } catch (error) {
     console.error(error);
     alert('An error occurred while processing the token data.');
