@@ -1,10 +1,30 @@
 // Function to parse URL parameters
 function getQueryParams() {
   const params = new URLSearchParams(window.location.search);
+  const tokenParam = params.get('token');
+  if (!tokenParam) {
+    return null;
+  }
+  const [collectionId, tokenId] = tokenParam.split('-');
   return {
-    img1: params.get('img1'),
-    img2: params.get('img2'),
+    collectionId,
+    tokenId,
   };
+}
+
+// Function to fetch token data from the API
+function fetchTokenData(collectionId, tokenId) {
+  const url = `https://rest.unique.network/v2/opal/token?collectionId=${collectionId}&tokenId=${tokenId}&withChildren=true`;
+  return fetch(url, {
+    headers: {
+      'accept': 'application/json',
+    },
+  }).then((response) => {
+    if (!response.ok) {
+      throw new Error('Failed to fetch token data');
+    }
+    return response.json();
+  });
 }
 
 // Function to load an image and return a Promise
@@ -20,27 +40,40 @@ function loadImage(url) {
 
 // Main function to compose images
 async function composeImages() {
-  const { img1, img2 } = getQueryParams();
-
-  if (!img1 || !img2) {
-    alert('Please provide both img1 and img2 URL parameters.');
+  const params = getQueryParams();
+  if (!params || !params.collectionId || !params.tokenId) {
+    alert('Please provide token parameter in format token={collectionId}-{tokenId}.');
     return;
   }
 
+  const { collectionId, tokenId } = params;
+
   try {
-    // Load both images concurrently
-    const [image1, image2] = await Promise.all([
-      loadImage(img1),
-      loadImage(img2),
-    ]);
+    // Fetch token data
+    const tokenData = await fetchTokenData(collectionId, tokenId);
+
+    // Extract image URLs
+    const imageUrls = [tokenData.image];
+
+    // If there are children, include their images
+    if (Array.isArray(tokenData.children)) {
+      tokenData.children.forEach((child) => {
+        if (child.image) {
+          imageUrls.push(child.image);
+        }
+      });
+    }
+
+    // Load all images
+    const images = await Promise.all(imageUrls.map((url) => loadImage(url)));
 
     // Create canvas context
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
 
-    // Determine canvas size based on images
-    const canvasWidth = Math.max(image1.width, image2.width);
-    const canvasHeight = Math.max(image1.height, image2.height);
+    // Determine canvas size based on the first image
+    const canvasWidth = images[0].width;
+    const canvasHeight = images[0].height;
     canvas.width = canvasWidth;
     canvas.height = canvasHeight;
 
@@ -51,25 +84,16 @@ async function composeImages() {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-    // Draw the first image
-    // You can adjust the x and y positions as needed
-    const img1X = 0; // X-coordinate for image1
-    const img1Y = 0; // Y-coordinate for image1
-    ctx.drawImage(image1, img1X, img1Y);
-
-    // Draw the second image on top of the first image
-    const img2X = 0; // X-coordinate for image2 (adjust for desired overlap)
-    const img2Y = 0; // Y-coordinate for image2 (adjust for desired overlap)
-    ctx.globalAlpha = 0.7; // Set transparency for overlapping effect (0.0 to 1.0)
-    ctx.drawImage(image2, img2X, img2Y);
-    ctx.globalAlpha = 1.0; // Reset alpha
+    // Draw images in order
+    images.forEach((image) => {
+      ctx.drawImage(image, 0, 0);
+    });
 
     // Provide a way to download the composed image
     createDownloadLink(canvas);
-
   } catch (error) {
     console.error(error);
-    alert('An error occurred while loading images.');
+    alert('An error occurred while processing the token data.');
   }
 }
 
